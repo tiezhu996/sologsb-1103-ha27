@@ -70,6 +70,10 @@ const menuOptions = computed<MenuOption[]>(() => {
       key: 'sheets'
     },
     {
+      label: () => h(RouterLink, { to: '/imports' }, { default: () => '控制台回传包导入' }),
+      key: 'imports'
+    },
+    {
       type: 'group',
       label: '当前场次',
       key: 'current-group',
@@ -86,6 +90,7 @@ const menuOptions = computed<MenuOption[]>(() => {
 
 const activeKey = computed(() => {
   const path = route.path
+  if (path.startsWith('/imports')) return 'imports'
   if (path.startsWith('/sheets')) return 'sheets'
   if (path.includes('/fixtures')) return 'fixtures'
   if (path.includes('/cues') || path.includes('/levels')) return 'cues'

@@ -29,7 +29,7 @@ docker compose up -d --build    # 改动代码后重新构建
 | 语言 | TypeScript（`strict`，无 `any`） | `npm run build` 内含 `vue-tsc --noEmit` 类型检查 |
 | UI 组件库 | Naive UI（暗色剧场主题） | 按需引入组件，无全局注册 |
 | 构建工具 | Vite 6 | 路由级代码分割 + 依赖单独 vendor 分块 |
-| 状态管理 | Pinia | 5 个 store，页面只读 store |
+| 状态管理 | Pinia | 6 个 store，页面只读 store |
 | 路由 | Vue Router 4（history 模式） | nginx `try_files` 做 SPA 回退 |
 | 本地存储 | IndexedDB（Dexie 4 封装） | 含数据结构版本号与升级迁移逻辑 |
 | 部署 | 多阶段 Dockerfile（node:20-alpine + nginx:alpine） | 构建期类型检查零错误 |
@@ -43,8 +43,18 @@ docker compose up -d --build    # 改动代码后重新构建
 | `/sessions/:id/cues` | Cue 编排时间轴 | 插入 / 复制 / 删除 Cue、拖拽调整先后、沿袭上一条参数、批量偏移过渡时间 | Cue、CueLevel |
 | `/cues/:id/levels` | 通道电平编辑 | 逐通道设定亮度与色温、色温漂移检查、一键对齐基准色温 | CueLevel、Fixture |
 | `/sheets` | 排演表生成与导出 | 勾选 Cue 组表、本地留存历史、预览 / 复制 / 下载纯文本 | RehearsalSheet、Cue |
+| `/imports` | 控制台回传包导入 | 粘贴控制台回传包、逐项对账（保留本地 / 控制台两来源）、检查点续跑、确认后只写指定场次 | ImportPacket、ImportEntry |
 
-核心动作闭环：**建场次 → 配灯位通道 → 插入 Cue → 设定过渡与通道电平 → 导出排演表**。
+核心动作闭环：**建场次 → 配灯位通道 → 插入 Cue → 设定过渡与通道电平 → 导出排演表**。演出前还可在控制台离线改 Cue，再到「控制台回传包导入」把回传包粘回来逐项对账。
+
+### 控制台回传包对账规则
+
+- **逐项对账，绝不先覆盖**：按「场次（演出序号）→ Cue 编号（Q12/Q12.5）→ DMX 通道号」三层自然键逐项比对，任一标量字段（提示语、触发、渐亮 / 渐暗 / 保持、备注；亮度、色温、对焦）值不同，就同时保留**本地值 / 控制台值**两个来源并置为待处理，由人工逐条选择「采用控制台 / 保留本地 / 忽略」。
+- **只写指定场次**：确认后的控制台值只更新回传包指定（或人工选择）的那一场，其他场次与历史排演表不受影响；排演表始终沿用生成时的快照版本。
+- **不重复写入**：同一回传包按 `packetId` 与规范化**内容指纹**（键序不敏感）双重判重，再粘一次直接命中已有记录。
+- **检查点续跑**：对账按 Cue 分组分块落库、应用逐条幂等；中断或失败后从检查点重试，已核对（已确认 / 已应用 / 保留本地 / 忽略）的进度继续保留。通道在指定场次未配接会置为「未配接」阻塞项，补齐配接后续跑即可落值。
+- **覆盖范围**：`partial` 只携带改动项；`full` 为整场快照，本地多出的 Cue / 通道电平会生成「本地独有」删除候选，同样需确认后才删除。
+- **旧数据兼容**：导入功能（v3）只新增两张表，既有场次 / Cue / 电平没有任何对账记录时一律按本地版本正常显示。
 
 ## 四、本地开发
 
@@ -75,11 +85,13 @@ sologsb-1103/
     └── src/
         ├── main.ts                 # 启动时先把本地数据载入 Pinia，再挂载视图
         ├── App.vue                 # 暗色主题外壳 + 侧边导航 + Message/Dialog Provider
-        ├── types/                  # 5 个数据模型，一模型一文件
+        ├── types/                  # 数据模型，一模型一文件
         │   ├── session.ts  fixture.ts  cue.ts  level.ts  sheet.ts
+        │   └── import.ts            # 控制台回传包 / 逐项对账记录模型
         ├── stores/                 # Pinia：跨页状态唯一来源
         │   ├── sessionStore.ts  cueStore.ts  fixtureStore.ts
         │   ├── levelStore.ts    sheetStore.ts
+        │   └── importStore.ts       # 回传包去重、检查点对账、确认应用
         ├── components/common/      # 共享组件
         │   ├── FadeBar.vue      # 渐变条：渐亮/保持/渐暗按比例绘制
         │   ├── ChannelChip.vue  # 通道标签：通道号 + 灯位色块 + 亮度百分比
@@ -91,6 +103,7 @@ sologsb-1103/
         ├── pages/
         │   ├── SessionList.vue  FixtureBoard.vue  CueTimeline.vue
         │   ├── LevelEditor.vue  SheetList.vue
+        │   └── ConsoleImport.vue    # 控制台回传包导入与逐项对账工作台
         ├── router/index.ts
         └── utils/
             ├── fade.ts     # 过渡时间格式化、色温一致性判定、排演表纯文本拼装
@@ -98,16 +111,18 @@ sologsb-1103/
             ├── export.ts   # 文本下载、文件名生成、剪贴板复制
             ├── cueOrder.ts # Cue 编号解析、比较、排序与位次计算
             ├── patch.ts    # 通道冲突 / 灯位负载纯函数
+            ├── consolePacket.ts  # 回传包解析校验、内容指纹、字段展示
+            ├── importReconcile.ts # 回传包 vs 本地现状的逐项对账纯函数
             └── id.ts       # 本地主键生成
 ```
 
 ## 六、数据存储说明
 
 - 所有数据存放在**浏览器本地 IndexedDB**，数据库名 `gbcuesheet`，由 `src/utils/db.ts` 用 Dexie 统一封装；页面不直接读写数据库，只调用 store 的 action。
-- 共 6 张表：`sessions`、`fixtures`、`cues`、`levels`、`sheets`、`appMeta`（元数据）。
-- **数据结构版本号**：`DB_VERSION = 2`。`version(1)` 定义初始结构；`version(2)` 新增 `updatedAt` / `sheetNo` 索引、`appMeta` 表，并在 `upgrade()` 中迁移既有数据（补齐 `updatedAt`、`orderIndex`、`holdSec`，规范化遗留排演表编号与条目快照）。
-- 删除场次会级联清理其灯位通道、Cue、通道电平与排演表；删除通道会清理对应的电平记录。
-- **容器无状态**：不使用数据库服务、不挂载命名卷；换浏览器或清理站点数据即等于清空。排演表以生成时刻的快照留档，之后修改 Cue 不影响历史记录。
+- 共 8 张表：`sessions`、`fixtures`、`cues`、`levels`、`sheets`、`appMeta`（元数据，也用于寄存回传包原文）、`importPackets`（回传包记录与导入阶段）、`importEntries`（逐项对账记录）。
+- **数据结构版本号**：`DB_VERSION = 3`。`version(1)` 定义初始结构；`version(2)` 新增 `updatedAt` / `sheetNo` 索引、`appMeta` 表，并在 `upgrade()` 中迁移既有数据（补齐 `updatedAt`、`orderIndex`、`holdSec`，规范化遗留排演表编号与条目快照）；`version(3)` 新增回传包导入两张表，旧数据无对账记录、按本地版本兼容显示，五张原表无需迁移。
+- 删除场次会级联清理其灯位通道、Cue、通道电平、排演表以及指向该场次的回传包导入记录；删除通道会清理对应的电平记录。
+- **容器无状态**：不使用数据库服务、不挂载命名卷；换浏览器或清理站点数据即等于清空。排演表以生成时刻的快照留档，之后修改 Cue 或导入控制台值都不影响历史记录。
 
 ## 七、容器化实现要点
 

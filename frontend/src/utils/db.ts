@@ -4,11 +4,12 @@ import type { Fixture } from '@/types/fixture'
 import type { CueLevel } from '@/types/level'
 import type { RehearsalSheet } from '@/types/sheet'
 import type { Session } from '@/types/session'
+import type { ImportEntry, ImportPacket } from '@/types/import'
 
 /** IndexedDB 数据库名 */
 export const DB_NAME = 'gbcuesheet'
 /** 当前数据结构版本号，与 db.version() 对应 */
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 /** 单键值元数据表，记录结构版本等本地状态 */
 export interface AppMetaRecord {
@@ -22,6 +23,8 @@ export interface AppMetaRecord {
  * - v1：场次 / 灯位通道 / Cue / 通道电平 / 排演表 五张表
  * - v2：场次补充 updatedAt 索引、排演表补充 sheetNo 索引与条目快照、新增 appMeta 元数据表，
  *       并对既有数据执行升级迁移（补齐字段、规范化遗留编号）
+ * - v3：新增控制台回传包导入（importPackets）与逐项对账记录（importEntries）两张表；
+ *       旧数据无任何对账记录，按本地版本兼容显示，无需迁移既有五张表
  */
 export class CueSheetDatabase extends Dexie {
   sessions!: Table<Session, string>
@@ -30,6 +33,8 @@ export class CueSheetDatabase extends Dexie {
   levels!: Table<CueLevel, string>
   sheets!: Table<RehearsalSheet, string>
   appMeta!: Table<AppMetaRecord, string>
+  importPackets!: Table<ImportPacket, string>
+  importEntries!: Table<ImportEntry, string>
 
   constructor() {
     super(DB_NAME)
@@ -76,6 +81,18 @@ export class CueSheetDatabase extends Dexie {
             if (!Array.isArray(sheet.includedCueIds)) sheet.includedCueIds = []
           })
       })
+
+    // v3 仅新增两张导入表；旧场次 / Cue / 电平无对账记录，沿用本地版本兼容显示
+    this.version(3).stores({
+      sessions: 'id, order, createdAt, updatedAt',
+      fixtures: 'id, sessionId, channel, [sessionId+channel]',
+      cues: 'id, sessionId, cueNo, orderIndex, [sessionId+orderIndex]',
+      levels: 'id, cueId, fixtureId, [cueId+fixtureId]',
+      sheets: 'id, sessionId, sheetNo, generatedAt',
+      appMeta: 'key',
+      importPackets: 'id, packetId, contentHash, targetSessionId, stage, pastedAt',
+      importEntries: 'id, packetId, status, decision, cueNo, [packetId+seq]'
+    })
   }
 }
 
@@ -84,8 +101,8 @@ export const db = new CueSheetDatabase()
 
 /** 读取元数据 */
 export async function readMeta(key: string): Promise<string | null> {
-  const record = await db.appMeta.get(key)
-  return record ? record.value : null
+  const meta = await db.appMeta.get(key)
+  return meta ? meta.value : null
 }
 
 /** 写入元数据 */
@@ -95,14 +112,20 @@ export async function writeMeta(key: string, value: string): Promise<void> {
 
 /** 清空全部本地数据（含结构版本回落重开） */
 export async function clearAllData(): Promise<void> {
-  await db.transaction('rw', [db.sessions, db.fixtures, db.cues, db.levels, db.sheets, db.appMeta], async () => {
-    await Promise.all([
-      db.sessions.clear(),
-      db.fixtures.clear(),
-      db.cues.clear(),
-      db.levels.clear(),
-      db.sheets.clear(),
-      db.appMeta.clear()
-    ])
-  })
+  await db.transaction(
+    'rw',
+    [db.sessions, db.fixtures, db.cues, db.levels, db.sheets, db.appMeta, db.importPackets, db.importEntries],
+    async () => {
+      await Promise.all([
+        db.sessions.clear(),
+        db.fixtures.clear(),
+        db.cues.clear(),
+        db.levels.clear(),
+        db.sheets.clear(),
+        db.appMeta.clear(),
+        db.importPackets.clear(),
+        db.importEntries.clear()
+      ])
+    }
+  )
 }
