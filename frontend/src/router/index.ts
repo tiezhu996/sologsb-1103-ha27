@@ -36,6 +36,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '排演表生成与导出' }
   },
   {
+    path: '/console',
+    name: 'console-import',
+    component: () => import('@/pages/ConsoleImport.vue'),
+    meta: { title: '控制台回传对账' }
+  },
+  {
     path: '/:pathMatch(.*)*',
     redirect: '/sessions'
   }
